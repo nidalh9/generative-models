@@ -186,7 +186,7 @@ def sample(
     v0 = 0
     view_indices = np.arange(V) + 1
     t0_list = (
-        range(0, n_frames, T)
+        range(0, n_frames, T-1)
         if sv4d2_model == "sv4d2"
         else range(0, n_frames - T + 1, T - 1)
     )
