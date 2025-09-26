@@ -1,9 +1,10 @@
 import math
 import os
+os.environ["OMP_NUM_THREADS"] = "16"  # Set before importing other libraries
 import sys
 from glob import glob
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), "../../")))
 import cv2
@@ -20,7 +21,6 @@ from sgm.inference.helpers import embed_watermark
 from sgm.util import default, instantiate_from_config
 from torchvision.transforms import ToTensor
 
-
 def sample(
     input_path: str = "assets/test_image.png",  # Can either be image file or folder with image files
     num_frames: Optional[int] = None,  # 21 for SV3D
@@ -33,7 +33,7 @@ def sample(
     decoding_t: int = 14,  # Number of frames decoded at a time! This eats most VRAM. Reduce if necessary.
     device: str = "cuda",
     output_folder: Optional[str] = None,
-    elevations_deg: Optional[float | List[float]] = 10.0,  # For SV3D
+    elevations_deg: Union[float , List[float]] = 10.0,  # For SV3D
     azimuths_deg: Optional[List[float]] = None,  # For SV3D
     image_frame_ratio: Optional[float] = None,
     verbose: Optional[bool] = False,
@@ -86,12 +86,13 @@ def sample(
         ), f"Please provide 1 value, or a list of {num_frames} values for elevations_deg! Given {len(elevations_deg)}"
         polars_rad = [np.deg2rad(90 - e) for e in elevations_deg]
         if azimuths_deg is None:
-            azimuths_deg = np.linspace(0, 360, num_frames + 1)[1:] % 360
+            azimuths_deg = np.linspace(0, 360, num_frames, endpoint=False)
         assert (
             len(azimuths_deg) == num_frames
         ), f"Please provide a list of {num_frames} values for azimuths_deg! Given {len(azimuths_deg)}"
-        azimuths_rad = [np.deg2rad((a - azimuths_deg[-1]) % 360) for a in azimuths_deg]
-        azimuths_rad[:-1].sort()
+        azimuths_rad = [np.deg2rad(a) for a in azimuths_deg]
+        print(f"Using azimuths (deg): {azimuths_deg}")
+        print(f"Using elevations (deg): {elevations_deg}")
     else:
         raise ValueError(f"Version {version} does not exist.")
 
@@ -125,6 +126,7 @@ def sample(
         raise ValueError
 
     for input_img_path in all_img_paths:
+        print(f"Processing {input_img_path}")
         if "sv3d" in version:
             image = Image.open(input_img_path)
             if image.mode == "RGBA":
@@ -154,6 +156,7 @@ def sample(
                 center - w // 2 : center - w // 2 + w,
             ] = image_arr[y : y + h, x : x + w]
             # resize frame to 576x576
+            print(f"Resizing input image from {in_h}x{in_w} to 576x576")
             rgba = Image.fromarray(padded_image).resize((576, 576), Image.LANCZOS)
             # white bg
             rgba_arr = np.array(rgba) / 255.0
@@ -262,7 +265,7 @@ def sample(
                 imageio.imwrite(
                     os.path.join(output_folder, f"{base_count:06d}.jpg"), input_image
                 )
-
+                print(f"Saved to {os.path.join(output_folder, f'{base_count:06d}.jpg')}")
                 samples = embed_watermark(samples)
                 samples = filter(samples)
                 vid = (
@@ -271,8 +274,10 @@ def sample(
                     .numpy()
                     .astype(np.uint8)
                 )
+                print(f"Saving video with frames num: {vid.shape[0]}")
                 video_path = os.path.join(output_folder, f"{base_count:06d}.mp4")
-                imageio.mimwrite(video_path, vid)
+                imageio.mimwrite(video_path, vid, fps=fps_id)
+                print(f"Saved to {video_path}")
 
 
 def get_unique_embedder_keys_from_conditioner(conditioner):

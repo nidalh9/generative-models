@@ -173,6 +173,7 @@ def preprocess_video(
     output_folder=None,
     image_frame_ratio=0.917,
     base_count=0,
+    fps=10,
 ):
     print(f"preprocess {input_path}")
     if output_folder is None:
@@ -285,7 +286,7 @@ def preprocess_video(
         images_v0.append(image)
 
     processed_file = os.path.join(output_folder, f"{base_count:06d}_process_input.mp4")
-    imageio.mimwrite(processed_file, images_v0, fps=10)
+    imageio.mimwrite(processed_file, images_v0, fps=fps)
     return processed_file
 
 

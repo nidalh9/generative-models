@@ -1,3 +1,4 @@
+# dense sampling
 import os
 import sys
 from glob import glob
@@ -82,7 +83,7 @@ def sample(
     output_folder: Optional[str] = "outputs",
     num_steps: Optional[int] = 50,
     img_size: int = 576,  # image resolution
-    n_frames: int = 21,  # number of input and output video frames
+    n_frames: int = 100,  # number of input and output video frames
     seed: int = 23,
     encoding_t: int = 8,  # Number of frames encoded at a time! This eats most VRAM. Reduce if necessary.
     decoding_t: int = 4,  # Number of frames decoded at a time! This eats most VRAM. Reduce if necessary.
@@ -136,6 +137,7 @@ def sample(
         output_folder=output_folder,
         image_frame_ratio=image_frame_ratio,
         base_count=base_count,
+        fps=30,
     )
     images_v0 = read_video(processed_input_path, n_frames=n_frames, device=device)
     images_t0 = torch.zeros(n_views, 3, H, W).float().to(device)
@@ -185,11 +187,19 @@ def sample(
     # Sampling novel-view videos
     v0 = 0
     view_indices = np.arange(V) + 1
-    t0_list = (
-        range(0, n_frames, T)
-        if sv4d2_model == "sv4d2"
-        else range(0, n_frames - T + 1, T - 1)
-    )
+    # t0_list = (
+    #     range(0, n_frames, T)
+    #     if sv4d2_model == "sv4d2"
+    #     else range(0, n_frames - T + 1, T - 1)
+    # )
+
+    stride = max(1, T - 1)  # 1-frame overlap (like the 8-view schedule)
+    t0_list = list(range(0, max(0, n_frames - T + 1), stride))
+    # make sure we always cover the tail exactly
+    if len(t0_list) == 0 or t0_list[-1] != n_frames - T:
+        t0_list.append(max(0, n_frames - T))
+    print("t0_list:", t0_list)
+
     for t0 in tqdm(t0_list):
         if t0 + T > n_frames:
             t0 = n_frames - T
@@ -228,6 +238,7 @@ def sample(
         save_video(
             vid_file,
             [img_matrix[t][v] for t in range(n_frames) if img_matrix[t][v] is not None],
+            fps=30,
         )
 
 
