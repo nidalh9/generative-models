@@ -6,8 +6,9 @@ This document describes the `sv4d_to_training_data.py` script, which extends the
 
 The script generates multiple novel-view videos using SV4D and automatically creates a training dataset with:
 - Organized folder structure compatible with NeRF/4D-GS training
-- `transforms_train.json` with Blender-format camera matrices
-- Individual frame images saved as PNG files
+- `transforms_train.json` and `transforms_test.json` with Blender-format camera matrices
+- Individual frame images saved as PNG files in both train/ and test/ folders
+- Automatic train/test split (default 80/20)
 - Optional video files for visualization
 
 ## Usage
@@ -36,12 +37,17 @@ The script creates the following folder structure:
 ```
 output_folder/
 └── dataset_name/
-    ├── transforms_train.json  # Camera parameters in Blender format
-    ├── train/                  # Training images
-    │   ├── r_000.png          # Frame 0, View 0
-    │   ├── r_001.png          # Frame 0, View 1
+    ├── transforms_train.json   # Training camera parameters
+    ├── transforms_test.json    # Test camera parameters
+    ├── train/                   # Training images
+    │   ├── r_000.png
+    │   ├── r_002.png
     │   └── ...
-    └── videos/                 # Optional visualization
+    ├── test/                    # Test images (20% of frames)
+    │   ├── r_001.png
+    │   ├── r_005.png
+    │   └── ...
+    └── videos/                  # Optional visualization
         ├── view_00.mp4
         ├── view_01.mp4
         └── ...
@@ -74,6 +80,7 @@ Main function that orchestrates the entire pipeline:
 - `remove_bg`: Whether to remove background using rembg
 - `camera_angle_x`: Camera FOV angle in radians (default: 0.6911)
 - `camera_distance`: Distance from camera to object (default: 4.0)
+- `test_split`: Fraction of frames to use for test set (default: 0.2)
 
 ### `convert_sv4d_to_blender_matrix()`
 Converts SV4D camera parameters to Blender-compatible 4x4 transformation matrices.
@@ -135,7 +142,7 @@ Generates the transforms_train.json file with camera parameters for all frames a
 ### `create_training_dataset()`
 Creates the complete training dataset folder structure with frames and transforms.
 
-**Purpose:** Organizes generated frames into a dataset compatible with NeRF/4D-GS training pipelines.
+**Purpose:** Organizes generated frames into a dataset compatible with NeRF/4D-GS training pipelines, with automatic train/test split.
 
 **Parameters:**
 - `img_matrix`: 2D list of image tensors [n_frames][n_views]
@@ -145,12 +152,19 @@ Creates the complete training dataset folder structure with frames and transform
 - `polars_rad`: Polar angles in radians
 - `n_views`: Number of views
 - `camera_angle_x`: Camera FOV angle
+- `test_split`: Fraction of frames for test set (default: 0.2)
 
 **Operations:**
-1. Creates folder structure (dataset/train/)
-2. Saves all frames as PNG images with sequential naming
-3. Generates and saves transforms_train.json
-4. Prints dataset statistics
+1. Creates folder structure (dataset/train/, dataset/test/)
+2. Splits frames into train and test sets
+3. Saves frames as PNG images in respective folders
+4. Generates and saves transforms_train.json and transforms_test.json
+5. Prints dataset statistics including train/test split
+
+**Test Split Strategy:**
+- Samples test frames uniformly across the entire sequence
+- Ensures temporal diversity in the test set
+- Maintains view diversity by sampling across all camera angles
 
 ### `save_frame_as_image()`
 Utility function to save a tensor frame as a PNG image.
@@ -203,10 +217,11 @@ python train.py --source_path outputs/training_data/my_dataset --model_path outp
 ## Differences from simple_video_sample_4d2.py
 
 While `simple_video_sample_4d2.py` only generates videos, this script additionally:
-1. Creates organized training dataset structure
-2. Generates Blender-format camera matrices
-3. Saves individual frames as images
+1. Creates organized training dataset structure with train/test split
+2. Generates Blender-format camera matrices for both training and testing
+3. Saves individual frames as images in separate folders
 4. Adds temporal information for 4D reconstruction
 5. Provides camera calibration parameters
+6. Automatically splits data for validation during training
 
-This makes the output directly usable for 4D scene reconstruction without additional preprocessing.
+This makes the output directly usable for 4D scene reconstruction without additional preprocessing, including proper validation setup.

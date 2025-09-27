@@ -182,13 +182,14 @@ def generate_transforms_json(n_frames, n_views, azimuths_rad, polars_rad, output
 
 
 def create_training_dataset(
-    img_matrix, 
-    output_folder, 
+    img_matrix,
+    output_folder,
     dataset_name,
     azimuths_rad,
     polars_rad,
     n_views,
-    camera_angle_x=0.6911112070083618
+    camera_angle_x=0.6911112070083618,
+    test_split=0.2
 ):
     """
     Create a training dataset folder structure similar to 2MoreBalls with generated frames.
@@ -201,6 +202,7 @@ def create_training_dataset(
         polars_rad: Polar angles in radians
         n_views: Number of views
         camera_angle_x: Camera FOV angle
+        test_split: Fraction of frames to use for test set (default 0.2)
     
     Returns:
         Path to created dataset folder
@@ -208,32 +210,81 @@ def create_training_dataset(
     # Create dataset folder structure
     dataset_path = os.path.join(output_folder, dataset_name)
     train_path = os.path.join(dataset_path, "train")
+    test_path = os.path.join(dataset_path, "test")
     os.makedirs(train_path, exist_ok=True)
+    os.makedirs(test_path, exist_ok=True)
     
     n_frames = len(img_matrix)
+    total_frames = n_frames * n_views
     
-    # Save all frames as images
+    # Determine test frame indices (sample uniformly across the sequence)
+    n_test_frames = max(1, int(total_frames * test_split))
+    test_frame_indices = set(np.linspace(0, total_frames - 1, n_test_frames, dtype=int))
+    
+    # Prepare data for transforms JSON files
+    train_frames_data = []
+    test_frames_data = []
+    
+    # Generate normalized time values for each frame
+    time_values = np.linspace(0, 1, n_frames)
+    
+    # Save all frames as images and prepare JSON data
     frame_idx = 0
     for t in range(n_frames):
         for v in range(n_views):
             if img_matrix[t][v] is not None:
-                frame_path = os.path.join(train_path, f"r_{frame_idx:03d}.png")
+                # Determine if this frame goes to train or test
+                is_test = frame_idx in test_frame_indices
+                
+                if is_test:
+                    frame_path = os.path.join(test_path, f"r_{frame_idx:03d}.png")
+                    file_path = f"./test/r_{frame_idx:03d}"
+                else:
+                    frame_path = os.path.join(train_path, f"r_{frame_idx:03d}.png")
+                    file_path = f"./train/r_{frame_idx:03d}"
+                
+                # Save the frame
                 save_frame_as_image(img_matrix[t][v], frame_path)
+                
+                # Create frame entry for JSON
+                frame_entry = {
+                    "file_path": file_path,
+                    "rotation": 0.0,
+                    "time": float(time_values[t]),
+                    "transform_matrix": convert_sv4d_to_blender_matrix(
+                        azimuths_rad[v],
+                        polars_rad[v],
+                        distance=4.0
+                    )
+                }
+                
+                if is_test:
+                    test_frames_data.append(frame_entry)
+                else:
+                    train_frames_data.append(frame_entry)
+                    
             frame_idx += 1
     
     # Generate and save transforms_train.json
-    transforms_path = os.path.join(dataset_path, "transforms_train.json")
-    generate_transforms_json(
-        n_frames=n_frames,
-        n_views=n_views,
-        azimuths_rad=azimuths_rad,
-        polars_rad=polars_rad,
-        output_path=transforms_path,
-        camera_angle_x=camera_angle_x
-    )
+    transforms_train_path = os.path.join(dataset_path, "transforms_train.json")
+    with open(transforms_train_path, 'w') as f:
+        json.dump({
+            "camera_angle_x": camera_angle_x,
+            "frames": train_frames_data
+        }, f, indent=4)
+    
+    # Generate and save transforms_test.json
+    transforms_test_path = os.path.join(dataset_path, "transforms_test.json")
+    with open(transforms_test_path, 'w') as f:
+        json.dump({
+            "camera_angle_x": camera_angle_x,
+            "frames": test_frames_data
+        }, f, indent=4)
     
     print(f"Training dataset created at: {dataset_path}")
     print(f"  - Total frames: {frame_idx}")
+    print(f"  - Training frames: {len(train_frames_data)}")
+    print(f"  - Test frames: {len(test_frames_data)}")
     print(f"  - Frames per timestep: {n_views}")
     print(f"  - Number of timesteps: {n_frames}")
     
@@ -259,14 +310,16 @@ def sample_with_training_output(
     remove_bg: bool = False,
     camera_angle_x: float = 0.6911112070083618,
     camera_distance: float = 4.0,
+    test_split: float = 0.2,
 ):
     """
     Generate multiple novel-view videos using SV4D and create training-ready dataset.
     
     This function extends simple_video_sample_4d2.py to also generate:
     - Organized folder structure for training (similar to dnerf/2MoreBalls)
-    - transforms_train.json with Blender-format camera matrices
-    - Individual frame images for training
+    - transforms_train.json and transforms_test.json with Blender-format camera matrices
+    - Individual frame images for training and testing
+    - Automatic train/test split
     
     Args:
         input_path: Path to input video or image folder
@@ -287,6 +340,7 @@ def sample_with_training_output(
         remove_bg: Whether to remove background
         camera_angle_x: Camera FOV angle in radians for transforms.json
         camera_distance: Distance from camera to object center
+        test_split: Fraction of frames to use for test set (default 0.2)
     """
     # Set model config
     assert os.path.basename(model_path) in [
