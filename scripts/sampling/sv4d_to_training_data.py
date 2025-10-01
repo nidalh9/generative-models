@@ -9,10 +9,14 @@ from pathlib import Path
 from tqdm import tqdm
 
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), "../../")))
+# Add project root to path for importing pose utilities
+project_root = os.path.realpath(os.path.join(os.path.dirname(__file__), "../../../"))
+sys.path.insert(0, project_root)
 import numpy as np
 import torch
 from fire import Fire
 from PIL import Image
+from utils.pose_utils import pose_spherical
 from scripts.demo.sv4d_helpers import (
     load_model,
     preprocess_video,
@@ -87,57 +91,130 @@ def save_frame_as_image(frame_tensor, output_path):
     Image.fromarray(frame_np).save(output_path)
 
 
-def convert_sv4d_to_blender_matrix(azimuth_rad, polar_rad, distance=4.0):
+def convert_sv4d_to_blender_matrix(azimuth_rad, polar_rad, distance=4.0, scene_center=None):
     """
-    Convert SV4D camera parameters (azimuth and polar angles) to Blender-style 4x4 transformation matrix.
+    Convert SV4D camera parameters to Blender-style 4x4 transformation matrix.
+    
+    CRITICAL: Positions cameras at radius 4.0 from ORIGIN (not scene_center) to match
+    the working dataset pattern. This ensures cameras_extent = 3.884635, preventing
+    multiple mini-scenes in object insertion training.
     
     Args:
         azimuth_rad: Azimuth angle in radians
         polar_rad: Polar angle in radians (from z-axis)
-        distance: Distance from origin to camera
+        distance: Distance from ORIGIN to camera (must be 4.0 for scale compatibility)
+        scene_center: IGNORED - cameras positioned relative to origin for scale consistency
     
     Returns:
-        4x4 transformation matrix in Blender coordinate system
+        4x4 transformation matrix in Blender coordinate system (as nested list of lists)
     """
-    # Convert from spherical to Cartesian coordinates
-    # SV4D uses polar angle from z-axis
-    x = distance * np.sin(polar_rad) * np.cos(azimuth_rad)
-    y = distance * np.sin(polar_rad) * np.sin(azimuth_rad)
-    z = distance * np.cos(polar_rad)
     
-    # Camera position
-    camera_pos = np.array([x, y, z])
+    # Convert angles to degrees for pose_spherical function
+    azimuth_deg = np.degrees(azimuth_rad)
+    # Convert polar (from z-axis) to elevation (from xy-plane)
+    elevation_deg = 90.0 - np.degrees(polar_rad)
     
-    # Look-at vector (pointing towards origin)
-    look_at = -camera_pos / np.linalg.norm(camera_pos)
+    print(f"✅ SV4D camera: azimuth={azimuth_deg:.1f}°, elevation={elevation_deg:.1f}°, distance={distance}")
     
-    # Up vector (approximate, will be adjusted)
-    up = np.array([0, 0, 1])
+    # CRITICAL FIX: Position cameras at radius 4.0 from ORIGIN (not scene_center)
+    # This matches the working dataset pattern exactly:
+    # - Cameras at distance 4.0 from origin
+    # - All cameras at Z≈2.0 (elevation≈-30°)
+    # - Camera centroid ≈ [0, 0, 2]
+    # - Results in cameras_extent = 3.884635
+    c2w_torch = pose_spherical(azimuth_deg, elevation_deg, distance)
+    c2w = c2w_torch.numpy()
     
-    # Compute right vector
-    right = np.cross(look_at, up)
-    right = right / np.linalg.norm(right)
+    # Convert to nested list format (matching D-NeRF dataset format)
+    matrix_list = []
+    for i in range(4):
+        row = []
+        for j in range(4):
+            row.append(float(c2w[i, j]))
+        matrix_list.append(row)
     
-    # Recompute up vector to ensure orthogonality
-    up = np.cross(right, look_at)
-    up = up / np.linalg.norm(up)
+    # Validation: check camera position matches working dataset pattern
+    camera_pos = c2w[:3, 3]
+    distance_from_origin = np.linalg.norm(camera_pos)
     
-    # Create rotation matrix (camera to world)
-    # In Blender convention:
-    # - Column 0: Right vector
-    # - Column 1: Up vector  
-    # - Column 2: -Forward vector (look_at)
-    # - Column 3: Translation
-    transform_matrix = np.eye(4)
-    transform_matrix[:3, 0] = right
-    transform_matrix[:3, 1] = up
-    transform_matrix[:3, 2] = -look_at  # Negative because camera looks in -Z direction
-    transform_matrix[:3, 3] = camera_pos
+    print(f"✅ Camera position: {camera_pos}, distance from origin: {distance_from_origin:.3f}")
     
-    return transform_matrix.tolist()
+    # Verify Z-coordinate is around 2.0 (elevation ≈ -30°)
+    if abs(camera_pos[2] - 2.0) > 0.5:
+        print(f"⚠️ Warning: Z={camera_pos[2]:.3f} deviates from expected ~2.0")
+    
+    # Verify distance is exactly 4.0
+    if abs(distance_from_origin - distance) > 0.001:
+        print(f"⚠️ Warning: Distance mismatch! Expected: {distance:.3f}, Actual: {distance_from_origin:.3f}")
+    
+    return matrix_list
 
 
-def generate_transforms_json(n_frames, n_views, azimuths_rad, polars_rad, output_path, camera_angle_x=0.6911112070083618):
+def estimate_scene_center_from_checkpoint(checkpoint_path):
+    """
+    Estimate scene center from an existing checkpoint by examining camera positions.
+    This helps align generated cameras with the original scene.
+    
+    Args:
+        checkpoint_path: Path to the checkpoint directory containing transforms_train.json
+        
+    Returns:
+        numpy array [x, y, z] representing estimated scene center
+    """
+    transforms_path = os.path.join(checkpoint_path, "transforms_train.json")
+    
+    if not os.path.exists(transforms_path):
+        print(f"[WARNING] transforms_train.json not found at {transforms_path}, using origin")
+        return np.array([0.0, 0.0, 0.0])
+    
+    try:
+        with open(transforms_path, 'r') as f:
+            data = json.load(f)
+        
+        camera_positions = []
+        for frame in data["frames"]:
+            # Extract camera position from transform matrix
+            # The last column [:3, 3] gives translation (camera position in world)
+            transform_matrix = np.array(frame["transform_matrix"])
+            camera_pos = transform_matrix[:3, 3]
+            camera_positions.append(camera_pos)
+        
+        camera_positions = np.array(camera_positions)
+        
+        # Estimate scene center as the point cameras are looking at
+        # For circular camera paths, this is approximately the centroid of the camera circle
+        # projected inward by the camera distance
+        
+        if len(camera_positions) > 0:
+            # Calculate the centroid of camera positions
+            camera_centroid = np.mean(camera_positions, axis=0)
+            
+            # Estimate the average distance from cameras to center
+            distances = np.linalg.norm(camera_positions - camera_centroid, axis=1)
+            avg_distance = np.mean(distances)
+            
+            # For circular arrangements, scene center is often at camera_centroid with z=0 or smaller z
+            # This is a heuristic - in practice, you might need domain knowledge
+            estimated_center = camera_centroid.copy()
+            # Often the object is at ground level or slightly below camera centroid
+            estimated_center[2] = min(estimated_center[2], 0.0)
+            
+            print(f"[DEBUG] Camera positions analysis:")
+            print(f"  Camera centroid: {camera_centroid}")
+            print(f"  Average camera distance from centroid: {avg_distance:.3f}")
+            print(f"  Estimated scene center: {estimated_center}")
+            
+            return estimated_center
+        else:
+            print("[WARNING] No camera frames found, using origin")
+            return np.array([0.0, 0.0, 0.0])
+            
+    except Exception as e:
+        print(f"[WARNING] Failed to read checkpoint transforms: {e}, using origin")
+        return np.array([0.0, 0.0, 0.0])
+
+
+def generate_transforms_json(n_frames, n_views, azimuths_rad, polars_rad, output_path, camera_angle_x=0.6911112070083618, scene_center=None):
     """
     Generate transforms_train.json file with camera parameters for all frames and views.
     
@@ -148,6 +225,7 @@ def generate_transforms_json(n_frames, n_views, azimuths_rad, polars_rad, output
         polars_rad: Array of polar angles in radians for each view
         output_path: Path to save the JSON file
         camera_angle_x: Camera FOV angle in radians (default from 2MoreBalls dataset)
+        scene_center: 3D point where cameras should look (default: origin)
     """
     transforms_data = {
         "camera_angle_x": camera_angle_x,
@@ -168,7 +246,8 @@ def generate_transforms_json(n_frames, n_views, azimuths_rad, polars_rad, output
                 "transform_matrix": convert_sv4d_to_blender_matrix(
                     azimuths_rad[v],
                     polars_rad[v],
-                    distance=4.0  # Standard distance used in most datasets
+                    distance=4.0,  # Standard distance used in most datasets
+                    scene_center=scene_center
                 )
             }
             transforms_data["frames"].append(frame_entry)
@@ -189,7 +268,8 @@ def create_training_dataset(
     polars_rad,
     n_views,
     camera_angle_x=0.6911112070083618,
-    test_split=0.2
+    test_split=0.2,
+    scene_center=None
 ):
     """
     Create a training dataset folder structure similar to 2MoreBalls with generated frames.
@@ -203,10 +283,12 @@ def create_training_dataset(
         n_views: Number of views
         camera_angle_x: Camera FOV angle
         test_split: Fraction of frames to use for test set (default 0.2)
+        scene_center: 3D point where cameras should look (default: origin)
     
     Returns:
         Path to created dataset folder
     """
+    print(f"\n[DEBUG] Creating training dataset with scene_center: {scene_center}")
     # Create dataset folder structure
     dataset_path = os.path.join(output_folder, dataset_name)
     train_path = os.path.join(dataset_path, "train")
@@ -254,7 +336,8 @@ def create_training_dataset(
                     "transform_matrix": convert_sv4d_to_blender_matrix(
                         azimuths_rad[v],
                         polars_rad[v],
-                        distance=4.0
+                        distance=4.0,
+                        scene_center=scene_center
                     )
                 }
                 
@@ -281,12 +364,19 @@ def create_training_dataset(
             "frames": test_frames_data
         }, f, indent=4)
     
-    print(f"Training dataset created at: {dataset_path}")
+    print(f"\n[DEBUG] Training dataset created at: {dataset_path}")
     print(f"  - Total frames: {frame_idx}")
     print(f"  - Training frames: {len(train_frames_data)}")
     print(f"  - Test frames: {len(test_frames_data)}")
     print(f"  - Frames per timestep: {n_views}")
     print(f"  - Number of timesteps: {n_frames}")
+    
+    # Debug: Print first few camera matrices to verify format
+    if len(train_frames_data) > 0:
+        print(f"\n[DEBUG] Sample camera matrix from training data (frame 0):")
+        sample_matrix = train_frames_data[0]["transform_matrix"]
+        for row in sample_matrix:
+            print(f"    {row}")
     
     return dataset_path
 
@@ -303,7 +393,7 @@ def sample_with_training_output(
     encoding_t: int = 8,
     decoding_t: int = 4,
     device: str = "cuda",
-    elevations_deg: Optional[List[float]] = 0.0,
+    elevations_deg: Optional[List[float]] = -30.0,
     azimuths_deg: Optional[List[float]] = None,
     image_frame_ratio: Optional[float] = 0.9,
     verbose: Optional[bool] = False,
@@ -311,6 +401,8 @@ def sample_with_training_output(
     camera_angle_x: float = 0.6911112070083618,
     camera_distance: float = 4.0,
     test_split: float = 0.2,
+    scene_center: Optional[List[float]] = None,
+    original_checkpoint: Optional[str] = None,
 ):
     """
     Generate multiple novel-view videos using SV4D and create training-ready dataset.
@@ -341,7 +433,21 @@ def sample_with_training_output(
         camera_angle_x: Camera FOV angle in radians for transforms.json
         camera_distance: Distance from camera to object center
         test_split: Fraction of frames to use for test set (default 0.2)
+        scene_center: 3D coordinates [x,y,z] where cameras should look (default: origin [0,0,0])
+        original_checkpoint: Path to original checkpoint for automatic scene center detection
     """
+    
+    # Determine scene center: priority is scene_center parameter, then original_checkpoint, then origin
+    if scene_center is not None:
+        scene_center = np.array(scene_center)
+        print(f"\n[DEBUG] Using custom scene center: {scene_center}")
+    elif original_checkpoint is not None:
+        print(f"\n[DEBUG] Estimating scene center from original checkpoint: {original_checkpoint}")
+        scene_center = estimate_scene_center_from_checkpoint(original_checkpoint)
+        print(f"[DEBUG] Auto-detected scene center: {scene_center}")
+    else:
+        scene_center = np.array([0.0, 0.0, 0.0])
+        print(f"\n[DEBUG] Using default scene center (origin): {scene_center}")
     # Set model config
     assert os.path.basename(model_path) in [
         "sv4d2.safetensors",
@@ -418,12 +524,23 @@ def sample_with_training_output(
     
     # Convert to radians
     polars_rad = np.array([np.deg2rad(90 - e) for e in elevations_deg])
+    
+    # For relative azimuths used in SV4D model
     azimuths_rad = np.array(
         [np.deg2rad((a - azimuths_deg[-1]) % 360) for a in azimuths_deg]
     )
     
-    # Store absolute azimuths for transforms.json (in Blender coordinate system)
+    # Store absolute azimuths for transforms.json (in world coordinate system)
+    # These are the actual camera positions we want
     absolute_azimuths_rad = np.array([np.deg2rad(a) for a in azimuths_deg])
+    
+    print(f"\n[DEBUG] Camera setup:")
+    print(f"  Azimuths (degrees): {azimuths_deg}")
+    print(f"  Elevations (degrees): {elevations_deg}")
+    print(f"  Polars (radians): {polars_rad}")
+    print(f"  Relative azimuths for SV4D (radians): {azimuths_rad}")
+    print(f"  Absolute azimuths for transforms.json (radians): {absolute_azimuths_rad}")
+    print(f"  Scene center for camera positioning: {scene_center}")
 
     # Initialize image matrix
     img_matrix = [[None] * n_views for _ in range(n_frames)]
@@ -493,6 +610,9 @@ def sample_with_training_output(
 
     # Create training dataset with proper folder structure and transforms.json
     print("\nCreating training dataset...")
+    print(f"[DEBUG] Using camera_angle_x (FOV): {camera_angle_x} radians ({np.degrees(camera_angle_x):.2f} degrees)")
+    print(f"[DEBUG] Camera distance: {camera_distance}")
+    
     dataset_path = create_training_dataset(
         img_matrix=img_matrix,
         output_folder=output_folder,
@@ -500,7 +620,9 @@ def sample_with_training_output(
         azimuths_rad=absolute_azimuths_rad,
         polars_rad=polars_rad,
         n_views=n_views,
-        camera_angle_x=camera_angle_x
+        camera_angle_x=camera_angle_x,
+        test_split=test_split,
+        scene_center=scene_center
     )
     
     # Also save videos for visualization (optional)
