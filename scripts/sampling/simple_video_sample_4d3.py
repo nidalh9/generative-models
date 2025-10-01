@@ -296,7 +296,7 @@ def sample(
                     # Collect transform data if requested
                     if save_transform_json:
                         # Use the same pose_spherical function as render.py
-                        azim = ((azimuths_deg[v] + 270 ) % 360) - 180 # Convert to render.py convention
+                        azim = - azimuths_deg[v] + 90  # Negate to match render.py convention
                         elev = -10 # Match render.py convention
                         radius = 4.0  # Default radius value to match render.py
                         # print(f'Radius: {radius}')
