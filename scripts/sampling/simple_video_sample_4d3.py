@@ -296,9 +296,8 @@ def sample(
                     # Collect transform data if requested
                     if save_transform_json:
                         # Use the same pose_spherical function as render.py
-                        azim = azimuths_deg[v]
-                        elev = elevations_deg[v]
-                        elev = -elev  # Negate to match render.py convention
+                        azim = ((azimuths_deg[v] + 270 ) % 360) - 180 # Convert to render.py convention
+                        elev = -10 # Match render.py convention
                         radius = 4.0  # Default radius value to match render.py
                         # print(f'Radius: {radius}')
 
@@ -424,8 +423,7 @@ def sample(
                         # Add transform data for new frames
                         if save_transform_json:
                             azim = azimuths_deg[v]
-                            elev = elevations_deg[v]
-                            elev = -elev
+                            elev = -10 # Match render.py convention
                             radius = 4.0
 
                             pose_matrix = pose_spherical(azim, elev, radius)
