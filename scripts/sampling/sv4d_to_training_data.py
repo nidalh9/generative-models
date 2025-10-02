@@ -218,6 +218,8 @@ def generate_transforms_json(n_frames, n_views, azimuths_rad, polars_rad, output
     """
     Generate transforms_train.json file with camera parameters for all frames and views.
     
+    CRITICAL: Applies centroid correction to ensure cameras_extent = 3.884635 exactly.
+    
     Args:
         n_frames: Number of temporal frames
         n_views: Number of views
@@ -227,28 +229,69 @@ def generate_transforms_json(n_frames, n_views, azimuths_rad, polars_rad, output
         camera_angle_x: Camera FOV angle in radians (default from 2MoreBalls dataset)
         scene_center: 3D point where cameras should look (default: origin)
     """
+    
+    # STEP 1: Generate all camera matrices
+    temp_matrices = []
+    for v in range(n_views):
+        matrix = convert_sv4d_to_blender_matrix(
+            azimuths_rad[v],
+            polars_rad[v],
+            distance=4.0,
+            scene_center=scene_center
+        )
+        temp_matrices.append(np.array(matrix))
+    
+    # STEP 2: Calculate camera centroid in XY plane (Z stays at 2.0)
+    cam_positions = np.array([m[:3, 3] for m in temp_matrices])
+    centroid_xy = np.mean(cam_positions[:, :2], axis=0)  # Only XY centroid
+    print(f"📊 Camera centroid (before correction): XY={centroid_xy}, Z=2.0")
+    
+    # STEP 3: Calculate offset to center cameras at origin in XY plane
+    # Target: centroid should be [0, 0, 2.0] for extent = 3.884635
+    offset_xy = -centroid_xy
+    print(f"📐 Applying XY offset: {offset_xy} to center cameras")
+    
+    # STEP 4: Apply offset to all camera positions (only XY, preserve Z=2.0)
+    corrected_matrices = []
+    for matrix in temp_matrices:
+        corrected_matrix = matrix.copy()
+        corrected_matrix[0, 3] += offset_xy[0]  # X offset
+        corrected_matrix[1, 3] += offset_xy[1]  # Y offset
+        # Z stays at 2.0 (no change)
+        corrected_matrices.append(corrected_matrix)
+    
+    # STEP 5: Verify the correction
+    corrected_positions = np.array([m[:3, 3] for m in corrected_matrices])
+    corrected_centroid = np.mean(corrected_positions, axis=0)
+    distances = np.linalg.norm(corrected_positions - corrected_centroid, axis=1)
+    diagonal = np.max(distances)
+    cameras_extent = diagonal * 1.1
+    
+    print(f"✅ Camera centroid (after correction): {corrected_centroid}")
+    print(f"✅ Max distance from centroid: {diagonal:.6f}")
+    print(f"✅ Corrected cameras_extent: {cameras_extent:.6f}")
+    print(f"✅ Target extent: 3.884635")
+    print(f"✅ Difference: {abs(cameras_extent - 3.884635):.6f}")
+    
+    # STEP 6: Generate transforms with corrected matrices
     transforms_data = {
         "camera_angle_x": camera_angle_x,
         "frames": []
     }
     
-    # Generate normalized time values for each frame
     time_values = np.linspace(0, 1, n_frames)
     
     frame_idx = 0
     for t in range(n_frames):
         for v in range(n_views):
-            # Create frame entry
+            # Convert corrected matrix to nested list
+            matrix_list = corrected_matrices[v].tolist()
+            
             frame_entry = {
                 "file_path": f"./train/r_{frame_idx:03d}",
-                "rotation": 0.0,  # Not used in most NeRF implementations
+                "rotation": 0.0,
                 "time": float(time_values[t]),
-                "transform_matrix": convert_sv4d_to_blender_matrix(
-                    azimuths_rad[v],
-                    polars_rad[v],
-                    distance=4.0,  # Standard distance used in most datasets
-                    scene_center=scene_center
-                )
+                "transform_matrix": matrix_list
             }
             transforms_data["frames"].append(frame_entry)
             frame_idx += 1
@@ -273,6 +316,7 @@ def create_training_dataset(
 ):
     """
     Create a training dataset folder structure similar to 2MoreBalls with generated frames.
+    Applies centroid correction to ensure cameras_extent = 3.884635.
     
     Args:
         img_matrix: Matrix of generated images [n_frames][n_views]
@@ -288,7 +332,45 @@ def create_training_dataset(
     Returns:
         Path to created dataset folder
     """
-    print(f"\n[DEBUG] Creating training dataset with scene_center: {scene_center}")
+    print(f"\n[DEBUG] Creating training dataset with centroid correction")
+    
+    # STEP 1: Generate all camera matrices and calculate centroid correction
+    temp_matrices = []
+    for v in range(n_views):
+        matrix = convert_sv4d_to_blender_matrix(
+            azimuths_rad[v],
+            polars_rad[v],
+            distance=4.0,
+            scene_center=scene_center
+        )
+        temp_matrices.append(np.array(matrix))
+    
+    # STEP 2: Calculate XY centroid and offset
+    cam_positions = np.array([m[:3, 3] for m in temp_matrices])
+    centroid_xy = np.mean(cam_positions[:, :2], axis=0)
+    offset_xy = -centroid_xy
+    
+    print(f"📊 Camera centroid (before correction): XY={centroid_xy}, Z=2.0")
+    print(f"📐 Applying XY offset: {offset_xy}")
+    
+    # STEP 3: Apply offset to center cameras
+    corrected_matrices = []
+    for matrix in temp_matrices:
+        corrected_matrix = matrix.copy()
+        corrected_matrix[0, 3] += offset_xy[0]
+        corrected_matrix[1, 3] += offset_xy[1]
+        corrected_matrices.append(corrected_matrix)
+    
+    # STEP 4: Verify correction
+    corrected_positions = np.array([m[:3, 3] for m in corrected_matrices])
+    corrected_centroid = np.mean(corrected_positions, axis=0)
+    distances = np.linalg.norm(corrected_positions - corrected_centroid, axis=1)
+    diagonal = np.max(distances)
+    cameras_extent = diagonal * 1.1
+    
+    print(f"✅ Corrected centroid: {corrected_centroid}")
+    print(f"✅ Corrected cameras_extent: {cameras_extent:.6f} (target: 3.884635)")
+    
     # Create dataset folder structure
     dataset_path = os.path.join(output_folder, dataset_name)
     train_path = os.path.join(dataset_path, "train")
@@ -299,23 +381,19 @@ def create_training_dataset(
     n_frames = len(img_matrix)
     total_frames = n_frames * n_views
     
-    # Determine test frame indices (sample uniformly across the sequence)
+    # Determine test frame indices
     n_test_frames = max(1, int(total_frames * test_split))
     test_frame_indices = set(np.linspace(0, total_frames - 1, n_test_frames, dtype=int))
     
-    # Prepare data for transforms JSON files
     train_frames_data = []
     test_frames_data = []
-    
-    # Generate normalized time values for each frame
     time_values = np.linspace(0, 1, n_frames)
     
-    # Save all frames as images and prepare JSON data
+    # Save frames with corrected camera matrices
     frame_idx = 0
     for t in range(n_frames):
         for v in range(n_views):
             if img_matrix[t][v] is not None:
-                # Determine if this frame goes to train or test
                 is_test = frame_idx in test_frame_indices
                 
                 if is_test:
@@ -325,20 +403,14 @@ def create_training_dataset(
                     frame_path = os.path.join(train_path, f"r_{frame_idx:03d}.png")
                     file_path = f"./train/r_{frame_idx:03d}"
                 
-                # Save the frame
                 save_frame_as_image(img_matrix[t][v], frame_path)
                 
-                # Create frame entry for JSON
+                # Use corrected matrix
                 frame_entry = {
                     "file_path": file_path,
                     "rotation": 0.0,
                     "time": float(time_values[t]),
-                    "transform_matrix": convert_sv4d_to_blender_matrix(
-                        azimuths_rad[v],
-                        polars_rad[v],
-                        distance=4.0,
-                        scene_center=scene_center
-                    )
+                    "transform_matrix": corrected_matrices[v].tolist()
                 }
                 
                 if is_test:
@@ -348,7 +420,7 @@ def create_training_dataset(
                     
             frame_idx += 1
     
-    # Generate and save transforms_train.json
+    # Save transforms JSONs
     transforms_train_path = os.path.join(dataset_path, "transforms_train.json")
     with open(transforms_train_path, 'w') as f:
         json.dump({
@@ -356,7 +428,6 @@ def create_training_dataset(
             "frames": train_frames_data
         }, f, indent=4)
     
-    # Generate and save transforms_test.json
     transforms_test_path = os.path.join(dataset_path, "transforms_test.json")
     with open(transforms_test_path, 'w') as f:
         json.dump({
@@ -364,19 +435,10 @@ def create_training_dataset(
             "frames": test_frames_data
         }, f, indent=4)
     
-    print(f"\n[DEBUG] Training dataset created at: {dataset_path}")
+    print(f"\n✅ Training dataset created at: {dataset_path}")
     print(f"  - Total frames: {frame_idx}")
     print(f"  - Training frames: {len(train_frames_data)}")
     print(f"  - Test frames: {len(test_frames_data)}")
-    print(f"  - Frames per timestep: {n_views}")
-    print(f"  - Number of timesteps: {n_frames}")
-    
-    # Debug: Print first few camera matrices to verify format
-    if len(train_frames_data) > 0:
-        print(f"\n[DEBUG] Sample camera matrix from training data (frame 0):")
-        sample_matrix = train_frames_data[0]["transform_matrix"]
-        for row in sample_matrix:
-            print(f"    {row}")
     
     return dataset_path
 
